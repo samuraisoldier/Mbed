@@ -40,32 +40,24 @@ const int8_t stateMap[] = {0x07,0x05,0x03,0x04,0x01,0x00,0x02,0x07};
 //const int8_t stateMap[] = {0x07,0x01,0x03,0x02,0x05,0x00,0x04,0x07}; //Alternative if phase order of input or drive is reversed
 
 //Phase lead to make motor spin
-const int8_t lead = 2;  //2 for forwards, -2 for backwards
+volatile int8_t lead = 2;  //2 for forwards, -2 for backwards
 
-//Message IDs
-const uint8_t debugg = 0;
-const uint8_t rotorinfo = 1;
-const uint8_t hashf = 2;
-const uint8_t hashr8 = 3;
-const uint8_t decodem = 4;
 
 //motor stuff
 volatile int8_t orState = 0;
-int us = 2000;
+const int16_t us = 2000;
 volatile int8_t oldRotorState;
-volatile int32_t oldmotorposition = 0;
-volatile int32_t motorPosition;
-volatile int32_t vel;
-volatile int32_t counterrr = 0;
+volatile int8_t motorPosition;
+volatile uint8_t basepw;
 
 //Decode Variables
 volatile uint64_t newKey;
 Mutex newKey_mutex;
-volatile uint64_t newVel;
+volatile int16_t newVel;
 Mutex newVel_mutex;
-volatile uint64_t newRot;
+volatile uint8_t newRot = 0;
 Mutex newRot_mutex;
-volatile uint64_t newTor;
+volatile uint8_t newTor = 0;
 
 //Father Time, his son and daughter
 Timer t;
@@ -92,12 +84,12 @@ DigitalOut L3H(L3Hpin);
 RawSerial pc(SERIAL_TX, SERIAL_RX);
 
 //Comm
-Thread commOutT;
-Thread motorCtrlT (osPriorityNormal,1024);
+Thread commOutT(osPriorityNormal,512);
+Thread motorCtrlT (osPriorityAboveNormal,2048);
 Thread commInT (osPriorityNormal,1024);
 
 //queue for received characters
-Queue<void, 16> inCharQ;
+Queue<void, 8> inCharQ;
 
 //struct for message sending
 typedef struct{
@@ -106,39 +98,27 @@ typedef struct{
     } message_t ;
 
 //instance of mail function to send out messages
-Mail<message_t,16> outMessages;
+Mail<message_t,2> outMessages;
 
 //function to print out message
 void putMessage(uint8_t code, uint32_t data){
-    //pc.printf("putmessage\n\r");
     message_t *pMessage = outMessages.alloc();
     pMessage->code = code;
     pMessage->data = data;
     outMessages.put(pMessage);
  }
 
-//
+
 void serialISR(){
+    //led1=!led1;
     uint8_t newChar = pc.getc();
     inCharQ.put((void*)newChar);
     //pc.printf("serialISR\n\r");
 }
 
-void motorOut(int8_t driveState, uint32_t pw, uint32_t torque);
-
-void rotorchange() {
-    int8_t rotorState = stateMap[I1 + 2*I2 + 4*I3];
-    motorOut((rotorState-orState+lead+6)%6,50,newTor);
-    if (rotorState - oldRotorState == 5) motorPosition--;
-    else if (rotorState - oldRotorState == -5) motorPosition++;
-    else motorPosition += (rotorState - oldRotorState);
-    oldRotorState = rotorState;
-    }
 
 //Set a given drive state
 void motorOut(int8_t driveState, uint32_t pw, uint32_t torque){
-    //pc.printf("motoroutin\n\r");
-//    motorISR();
     //Lookup the output byte from the drive state.
     int8_t driveOut = driveTable[driveState & 0x07];
       
@@ -157,7 +137,16 @@ void motorOut(int8_t driveState, uint32_t pw, uint32_t torque){
     if (driveOut & 0x08) L2H = 0;
     if (driveOut & 0x10) L3L.pulsewidth_us((us*pw)/100);
     if (driveOut & 0x20) L3H = 0;
-    //pc.printf("motoroutend\n\r");
+    }
+ 
+ void rotorchange() {
+    
+    int8_t rotorState = stateMap[I1 + 2*I2 + 4*I3];
+    motorOut((rotorState-orState+lead+6)%6,basepw,newTor);
+    if (rotorState - oldRotorState == 5) motorPosition--;
+    else if (rotorState - oldRotorState == -5) motorPosition++;
+    else motorPosition += (rotorState - oldRotorState);
+    oldRotorState = rotorState;
     }
  
 void motorCtrlTick(){
@@ -166,47 +155,74 @@ void motorCtrlTick(){
 
 void motorCtrlFn(){
     Ticker motorCtrlTicker;
+    int16_t vel;
+    int8_t oldmotorposition = 0;
     motorCtrlTicker.attach_us(&motorCtrlTick,100000);
+    uint32_t counterrr = 0;
+    int y = 0;
+    int k = 300;
     while(1){
        motorCtrlT.signal_wait(0x1);
-       vel = (motorPosition - oldmotorposition)*10;
+       vel = (int16_t)((motorPosition - oldmotorposition)*10)/6;
+       oldmotorposition = motorPosition;
        counterrr++;
-       if (counterrr%10) putMessage(rotorinfo ,(motorPosition, vel));
-       }
-   }
-
+       if (!(counterrr%10)) putMessage(7 ,(int16_t)(vel));
+       newKey_mutex.lock();
+       if(newVel==0){
+           y = 100;
+        }
+        /*else if(vel==0){
+            motorOut((motorPosition-2), 50, newTor);
+        }*/
+        else{
+            y = k*(newVel-vel);
+            if (y<0){
+                y = -y;
+                lead = -2;
+            }
+            else{
+                lead = 2;
+            }
+        }
+        newKey_mutex.unlock();
+        basepw=y; 
+        rotorchange();
+    }
+}
     //Convert photointerrupter inputs to a rotor state
 inline int8_t readRotorState(){
-    //putMessage(debugg ,((uint32_t)("Hello3\n\r")));
     return stateMap[I1 + 2*I2 + 4*I3];
     }
 
 int8_t motorhome(){
     //Run the motor synchronisation
-    putMessage(debugg ,((uint32_t)("Hello4\n\r")));
     motorOut(0, 50, newTor);
     wait(1.0);
     return readRotorState();
     //orState is subtracted from future rotor state inputs to align rotor and motor states
 }    
-/*
-//This is to update rotor state using ISR
-void rotorchange(){
-    //putMessage(debugg ,((uint32_t)("Hello5\n\r")));
-    int8_t intState = 0;
-    intState = readRotorState();
-    motorOut(((intState-orState+lead+6)%6),50,newTor); //+6 to make sure the remainder is positive
-}*/
  
 // Comm function
 void commOutFn(){
-    putMessage(debugg ,((uint32_t)("Hello6\n\r")));
     while(1) {
     osEvent newEvent = outMessages.get();
     message_t *pMessage = (message_t*)newEvent.value.p;
-    pc.printf("%x %x \n\r",pMessage->code,pMessage->data);
-    //pc.printf("commoutfn\n\r");
-    outMessages.free(pMessage);
+    if(pMessage->code == 8){
+        pc.printf("%x %c \n\r",pMessage->code,pMessage->data);
+        outMessages.free(pMessage);
+    }
+    else if(pMessage->code == 0){
+        pc.printf("%x %s \n\r",pMessage->code,pMessage->data);
+        outMessages.free(pMessage);
+    }
+    else if(pMessage->code == 7){
+        pc.printf("%x %d \n\r",pMessage->code,pMessage->data);
+        outMessages.free(pMessage);
+    }          
+    else{
+        pc.printf("%x %x \n\r",pMessage->code,pMessage->data);
+        outMessages.free(pMessage);
+    }
     }
 }
 
@@ -216,50 +232,50 @@ void threadf(){
     char newCmd[32];
     pc.attach(&serialISR);
     while(1) {
+    
     osEvent newEvent = inCharQ.get();
+    //led1 = !led1;
     uint8_t newChar = (uint8_t)newEvent.value.p;
     
-    led1 = !led1;
-    putMessage(64,newChar);
-    /*
-    index++;
-    if (index<32){
-        if (newChar == '/r'){
-            newCmd[index] = '/0';
-            index = 0;
-                if (newCmd[0] == 'K'){
-                    newKey_mutex.lock();
-                    sscanf(newCmd, "K%x", &newKey); //Decode the command
-                    newKey_mutex.unlock();
-                    putMessage(decodem ,((uint32_t)("Message Decoded")));
-                }
-                else if (newCmd[0]=='V'){
-                    newVel_mutex.lock();
-                    sscanf(newCmd, "V%x", &newVel);
-                    newVel_mutex.unlock();
-                    putMessage(decodem ,((uint32_t)("Message Decoded")));
-                }
-                else if (newCmd[0]=='R'){
-                    newRot_mutex.lock();
-                    sscanf(newCmd, "R%x", &newRot); //Decode the command
-                    newRot_mutex.unlock();
-                    putMessage(decodem ,((uint32_t)("Message Decoded")));
-                }
-                if (newCmd[0] == 'T'){
-                    sscanf(newCmd, "T%x", &newTor); //Decode the command
-                    putMessage(decodem ,((uint32_t)("Message Decoded")));
-                }
-        }
-        else{
+    //led1 = !led1;
+    putMessage(8,newChar);
+    
+    if (newChar == '\r'){
+        newCmd[index] = '\0';
+        index = 0;
+            if (newCmd[0] == 'K'){
+                newKey_mutex.lock();
+                sscanf(newCmd, "K%x", &newKey); //Decode the command
+                newKey_mutex.unlock();
+                putMessage(0 ,((uint32_t)("Key Decoded")));
+            }
+            else if (newCmd[0]=='V'){
+                newVel_mutex.lock();
+                sscanf(newCmd, "V%x", &newVel);
+                newVel_mutex.unlock();
+                putMessage(0 ,((uint32_t)("Velocity Decoded")));
+            }
+            else if (newCmd[0]=='R'){
+                newRot_mutex.lock();
+                sscanf(newCmd, "R%x", &newRot); //Decode the command
+                newRot_mutex.unlock();
+                putMessage(0 ,((uint32_t)("Rotations Decoded")));
+            }
+            else if (newCmd[0] == 'T'){
+                sscanf(newCmd, "T%x", &newTor); //Decode the command
+                putMessage(0 ,((uint32_t)("Torque Decoded")));
+            }
+        } 
+        else {
+            led1 = !led1;
             newCmd[index] = newChar;
+            index++;
         }
-    }*/
     }
 }
 
 //Main
 int main(){
-    //pc.printf("mainfn\n\r");
     //All comm stuff gon go here
     commOutT.start(commOutFn);
     motorCtrlT.start(motorCtrlFn);
@@ -268,10 +284,12 @@ int main(){
     L2L.period_us(us);
     L3L.period_us(us);
     
-    putMessage(debugg ,((uint32_t)("Hello\n\r")));
+    m.start();
+    
+    putMessage(0 ,((uint32_t)("Hello\n\r")));
     
     orState = motorhome();
-    putMessage(rotorinfo ,("Rotor origin: %x\n\r",orState));
+//    putMessage(1 ,("Rotor origin: %x\n\r",orState));
     
     //autostart
     motorOut(1,50,newTor);    
@@ -282,11 +300,7 @@ int main(){
     I1.fall(rotorchange);
     I2.fall(rotorchange);
     I3.fall(rotorchange);
-    
-    //                                                                      one of these will work 
-    //pc.attach(&threadf, RawSerial::RxIrq);
-    //pc.attach(&threadf, Serial::RxIrq);
-    
+        
     //bitcoin stuff starts here
     
     uint8_t sequence[] = {0x45,0x6D,0x62,0x65,0x64,0x64,0x65,0x64,
@@ -313,22 +327,19 @@ int main(){
 
         
     for (uint64_t ij=0; ij<=0xFFFFFFFFFFFFFFFF; ij++){
-        //pc.printf("in the for loop\n\r");
         *nonce = ij;
         SHA256::computeHash(hash, sequence, 64);
         if (!(hash[0] or hash[1])){
             count++;
         //  putMessage(hashf ,((uint32_t)("Successful Hash found: ", hash)));
-            putMessage(hashf ,((uint32_t)("Successful Hash found, nonce: ", ij)));
-            //pc.printf("put ij");
+        //    putMessage(0 ,((uint32_t)("Successful Hash found, nonce: ")));
+            putMessage(2 ,((uint32_t)(*nonce)));
         }
         if ((t.read()>=1)){
-            putMessage(hashr8 ,((uint32_t)("Hash rate is ", hashrate)));
-            //pc.printf("put hashrate\n\r");
+        //    putMessage(hashr8 ,((uint32_t)("Hash rate is ", hashrate)));
             t.reset();
         }
         if (count == 3){
-            //pc.printf("count\n\r");
             hashrate = 1000*(count/c.read());
             count = 0;
             c.reset();
