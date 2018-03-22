@@ -108,7 +108,6 @@ void putMessage(uint8_t code, uint32_t data){
     outMessages.put(pMessage);
  }
 
-
 void serialISR(){
     //led1=!led1;
     uint8_t newChar = pc.getc();
@@ -160,20 +159,35 @@ void motorCtrlFn(){
     motorCtrlTicker.attach_us(&motorCtrlTick,100000);
     uint32_t counterrr = 0;
     int y = 0;
-    int k = 300;
+    int k = 100;
     while(1){
        motorCtrlT.signal_wait(0x1);
-       vel = (int16_t)((motorPosition - oldmotorposition)*10)/6;
-       oldmotorposition = motorPosition;
+       //quik mafs
+       uint8_t motordiff = motorPosition-oldmotorposition;
+       uint16_t ys;
+       if ((motordiff<0)&(lead==2)){
+            motordiff= (motordiff+6);
+        }
+        vel = (int16_t)(((motordiff)*10)/6);
+        newRot_mutex.lock();
+        if (!(newRot==0)){
+            if(newRot<(2*vel)){
+                ys = vel/1.5;
+                if (ys<y){
+                    y=ys;
+                }
+            }
+        }
+       newRot_mutex.unlock();
        counterrr++;
        if (!(counterrr%10)) putMessage(7 ,(int16_t)(vel));
-       newKey_mutex.lock();
        if(newVel==0){
            y = 100;
         }
-        /*else if(vel==0){
-            motorOut((motorPosition-2), 50, newTor);
+        /*else if((!(vel==newVel))&(vel==0)){
+            rotorchange();
         }*/
+        
         else{
             y = k*(newVel-vel);
             if (y<0){
@@ -184,9 +198,10 @@ void motorCtrlFn(){
                 lead = 2;
             }
         }
-        newKey_mutex.unlock();
         basepw=y; 
         rotorchange();
+        
+    oldmotorposition = motorPosition;
     }
 }
     //Convert photointerrupter inputs to a rotor state
@@ -267,7 +282,7 @@ void threadf(){
             }
         } 
         else {
-            led1 = !led1;
+            //led1 = !led1;
             newCmd[index] = newChar;
             index++;
         }
@@ -276,6 +291,7 @@ void threadf(){
 
 //Main
 int main(){
+    fseek(stdin,0,SEEK_END);
     //All comm stuff gon go here
     commOutT.start(commOutFn);
     motorCtrlT.start(motorCtrlFn);
